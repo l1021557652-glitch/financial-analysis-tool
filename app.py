@@ -23,30 +23,31 @@ def get_all_sheets_data(file):
         return {}
 
 def detect_sheet_type(df):
-    first_col = df.iloc[:, 0].astype(str).str.cat(sep=' ')
-    second_row = df.iloc[1].astype(str).str.cat(sep=' ') if len(df) > 1 else ''
+    text = df.astype(str).values.flatten()
+    text_str = ' '.join(text)
     
     score = {'balance': 0, 'income': 0, 'cashflow': 0}
     
-    balance_keywords = ['资产', '负债', '权益', '流动资产', '流动负债', '所有者权益', '固定资产', '无形资产', '短期借款', '长期借款']
-    income_keywords = ['收入', '成本', '利润', '营业利润', '净利润', '毛利率', '营业收入', '营业成本', '销售费用', '管理费用', '财务费用']
-    cashflow_keywords = ['现金流量', '经营活动', '投资活动', '筹资活动', '现金流入', '现金流出', '期末现金']
+    balance_keywords = ['资产', '负债', '权益', '流动资产', '流动负债', '所有者权益', '固定资产', '无形资产', '短期借款', '长期借款', '货币资金', '应收账款', '存货']
+    income_keywords = ['收入', '成本', '利润', '营业利润', '净利润', '毛利率', '营业收入', '营业成本', '销售费用', '管理费用', '财务费用', '主营业务']
+    cashflow_keywords = ['现金流量', '经营活动', '投资活动', '筹资活动', '现金流入', '现金流出', '期末现金', '现金及现金等价物']
     
     for kw in balance_keywords:
-        if kw in first_col or kw in second_row:
+        if kw in text_str:
             score['balance'] += 1
     
     for kw in income_keywords:
-        if kw in first_col or kw in second_row:
+        if kw in text_str:
             score['income'] += 1
     
     for kw in cashflow_keywords:
-        if kw in first_col or kw in second_row:
+        if kw in text_str:
             score['cashflow'] += 1
     
     max_score = max(score.values())
     if max_score == 0:
         return 'unknown'
+    
     if score['balance'] == max_score:
         return 'balance'
     elif score['income'] == max_score:
@@ -55,98 +56,117 @@ def detect_sheet_type(df):
         return 'cashflow'
     return 'unknown'
 
-def find_header_row(df):
-    for i in range(min(10, len(df))):
-        row_str = str(df.iloc[i].astype(str).str.cat(sep=' '))
-        if any(kw in row_str for kw in ['资产', '负债', '收入', '利润', '现金流量', '项目']):
-            return i
-    return 0
+def parse_number(val):
+    if pd.isna(val):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    val_str = str(val).strip()
+    if val_str == '' or val_str.lower() == 'nan':
+        return None
+    val_str = val_str.replace(',', '').replace(' ', '')
+    val_str = val_str.replace('(', '-').replace(')', '')
+    val_str = val_str.replace('−', '-').replace('—', '-').replace('–', '-')
+    try:
+        return float(val_str)
+    except:
+        return None
 
 def extract_financial_data(df, sheet_type):
-    df_clean = df.copy()
-    header_row = find_header_row(df_clean)
-    df_clean.columns = df_clean.iloc[header_row]
-    df_clean = df_clean.iloc[header_row + 1:]
-    df_clean = df_clean.reset_index(drop=True)
-    
     result = {}
     
-    for col in df_clean.columns:
-        col_str = str(col).strip()
-        if col_str == 'nan' or col_str == '':
+    balance_mapping = {
+        '货币资金': ['货币资金', '现金', '银行存款', '其他货币资金'],
+        '应收账款': ['应收账款', '应收款项', '应收款'],
+        '存货': ['存货', '库存商品', '原材料'],
+        '固定资产': ['固定资产', '累计折旧', '在建工程'],
+        '无形资产': ['无形资产', '土地使用权', '专利权'],
+        '资产总计': ['资产总计', '资产合计', '流动资产合计', '非流动资产合计'],
+        '短期借款': ['短期借款', '短期负债'],
+        '应付账款': ['应付账款', '应付款项', '应付款'],
+        '流动负债合计': ['流动负债合计', '流动负债'],
+        '长期借款': ['长期借款', '长期负债'],
+        '负债合计': ['负债合计', '负债总计', '负债总计'],
+        '实收资本': ['实收资本', '股本', '注册资本'],
+        '资本公积': ['资本公积', '资本溢价'],
+        '盈余公积': ['盈余公积', '法定盈余公积'],
+        '未分配利润': ['未分配利润', '未分配利润(损失)'],
+        '所有者权益合计': ['所有者权益合计', '股东权益合计', '权益合计']
+    }
+    
+    income_mapping = {
+        '营业收入': ['营业收入', '主营业务收入', '销售收入', '营业总收入', '本期发生额'],
+        '营业成本': ['营业成本', '主营业务成本', '销售成本', '营业成本(损失)'],
+        '毛利润': ['毛利润', '毛利'],
+        '销售费用': ['销售费用', '营业费用'],
+        '管理费用': ['管理费用'],
+        '财务费用': ['财务费用'],
+        '研发费用': ['研发费用', '研究与开发费用'],
+        '营业利润': ['营业利润', '经营利润'],
+        '利润总额': ['利润总额', '税前利润'],
+        '净利润': ['净利润', '净利润', '本期净利润', '本年累计净利润']
+    }
+    
+    cashflow_mapping = {
+        '销售商品提供劳务': ['销售商品提供劳务', '销售商品、提供劳务收到的现金'],
+        '经营活动流入': ['经营活动流入', '经营活动现金流入小计'],
+        '经营活动流出': ['经营活动流出', '经营活动现金流出小计'],
+        '经营活动净流量': ['经营活动产生的现金流量净额', '经营活动净流量', '经营活动现金流量净额'],
+        '投资活动净流量': ['投资活动产生的现金流量净额', '投资活动净流量', '投资活动现金流量净额'],
+        '筹资活动净流量': ['筹资活动产生的现金流量净额', '筹资活动净流量', '筹资活动现金流量净额'],
+        '期末现金': ['期末现金及现金等价物余额', '期末现金', '现金及现金等价物净增加额']
+    }
+    
+    mapping = {'balance': balance_mapping, 'income': income_mapping, 'cashflow': cashflow_mapping}
+    
+    for row_idx in range(len(df)):
+        row_text = ''
+        row_values = []
+        
+        for col_idx in range(min(5, len(df.columns))):
+            val = df.iloc[row_idx, col_idx]
+            val_str = str(val) if pd.notna(val) else ''
+            row_text += val_str + ' '
+            
+            num = parse_number(val)
+            if num is not None:
+                row_values.append((col_idx, num))
+        
+        row_text = row_text.strip().lower()
+        
+        if not row_values:
             continue
         
-        values = []
-        for val in df_clean[col]:
-            if pd.isna(val):
-                continue
-            try:
-                val_str = str(val).replace(',', '').replace(' ', '').replace('(', '-').replace(')', '')
-                val_str = val_str.replace('−', '-')
-                num = float(val_str)
-                values.append((col_str, num))
-            except:
-                continue
+        target_mapping = mapping.get(sheet_type, {})
         
-        for name, num in values:
-            if sheet_type == 'balance':
-                if any(kw in name for kw in ['货币资金', '现金', '存款']):
-                    result.setdefault('货币资金', []).append(num)
-                elif any(kw in name for kw in ['应收账款', '应收']):
-                    result.setdefault('应收账款', []).append(num)
-                elif any(kw in name for kw in ['存货']):
-                    result.setdefault('存货', []).append(num)
-                elif any(kw in name for kw in ['固定资产', '在建工程']):
-                    result.setdefault('固定资产', []).append(num)
-                elif any(kw in name for kw in ['无形资产', '长期投资']):
-                    result.setdefault('无形资产', []).append(num)
-                elif any(kw in name for kw in ['资产总计', '流动资产合计', '非流动资产合计']):
-                    result.setdefault('资产总计', []).append(num)
-                elif any(kw in name for kw in ['短期借款', '应付账款', '应付']):
-                    result.setdefault('流动负债', []).append(num)
-                elif any(kw in name for kw in ['长期借款', '长期负债']):
-                    result.setdefault('长期负债', []).append(num)
-                elif any(kw in name for kw in ['负债合计', '流动负债合计', '非流动负债合计']):
-                    result.setdefault('负债总计', []).append(num)
-                elif any(kw in name for kw in ['实收资本', '资本公积', '盈余公积', '未分配利润', '所有者权益合计', '股东权益']):
-                    result.setdefault('所有者权益', []).append(num)
-                elif any(kw in name for kw in ['负债和所有者权益', '负债与所有者权益']):
-                    result.setdefault('负债加权益', []).append(num)
-            
-            elif sheet_type == 'income':
-                if any(kw in name for kw in ['营业收入', '主营业务收入', '销售收入']):
-                    result.setdefault('营业收入', []).append(num)
-                elif any(kw in name for kw in ['营业成本', '主营业务成本', '销售成本']):
-                    result.setdefault('营业成本', []).append(num)
-                elif any(kw in name for kw in ['销售费用', '管理费用', '财务费用', '研发费用', '期间费用']):
-                    result.setdefault('期间费用', []).append(num)
-                elif any(kw in name for kw in ['毛利润', '毛利']):
-                    result.setdefault('毛利润', []).append(num)
-                elif any(kw in name for kw in ['营业利润', '利润总额']):
-                    result.setdefault('营业利润', []).append(num)
-                elif any(kw in name for kw in ['净利润']):
-                    result.setdefault('净利润', []).append(num)
-            
-            elif sheet_type == 'cashflow':
-                if any(kw in name for kw in ['销售商品', '提供劳务', '经营活动流入', '经营活动现金流量']):
-                    result.setdefault('经营活动流入', []).append(num)
-                elif any(kw in name for kw in ['购买商品', '支付税费', '经营活动流出', '支付']):
-                    result.setdefault('经营活动流出', []).append(num)
-                elif any(kw in name for kw in ['经营活动产生的现金流量', '经营活动净流量']):
-                    result.setdefault('经营活动净流量', []).append(num)
-                elif any(kw in name for kw in ['投资活动产生的现金流量', '投资活动净流量', '投资收益']):
-                    result.setdefault('投资活动净流量', []).append(num)
-                elif any(kw in name for kw in ['筹资活动产生的现金流量', '筹资活动净流量', '吸收投资', '借款']):
-                    result.setdefault('筹资活动净流量', []).append(num)
-                elif any(kw in name for kw in ['期末现金', '现金及现金等价物']):
-                    result.setdefault('期末现金', []).append(num)
+        for key, keywords in target_mapping.items():
+            if any(kw in row_text for kw in keywords):
+                if key in result:
+                    result[key] = max(result[key], max(v[1] for v in row_values))
+                else:
+                    result[key] = max(v[1] for v in row_values)
     
-    final_result = {}
-    for k, v in result.items():
-        if v:
-            final_result[k] = max(v) if v else 0
+    if not result:
+        for row_idx in range(len(df)):
+            row_text = ''
+            row_values = []
+            
+            for col_idx in range(len(df.columns)):
+                val = df.iloc[row_idx, col_idx]
+                num = parse_number(val)
+                if num is not None:
+                    first_col_val = df.iloc[row_idx, 0]
+                    if pd.notna(first_col_val):
+                        row_values.append((str(first_col_val).strip(), num))
+            
+            if row_values:
+                for name, num in row_values:
+                    name_lower = str(name).lower()
+                    if any(kw in name_lower for kw in ['资产', '负债', '权益', '收入', '成本', '利润', '现金']):
+                        if name not in result or abs(num) > abs(result.get(name, 0)):
+                            result[name] = num
     
-    return final_result
+    return result
 
 def analyze_all_sheets(all_sheets_data):
     results = {}
@@ -185,35 +205,65 @@ def calculate_metrics(results):
         elif info['type'] == 'cashflow':
             cashflow_data.update(info['data'])
     
-    if balance_data:
-        total_assets = balance_data.get('资产总计', 0)
-        total_liabilities = balance_data.get('负债总计', 0)
-        total_equity = balance_data.get('所有者权益', 0)
-        
-        metrics['资产负债率'] = (total_liabilities / total_assets * 100) if total_assets > 0 else 0
-        metrics['权益乘数'] = (total_assets / total_equity) if total_equity > 0 else 0
+    total_assets = balance_data.get('资产总计', 0)
+    if total_assets == 0:
+        for k, v in balance_data.items():
+            if '资产' in k and '合计' in k:
+                total_assets = v
+                break
     
-    if income_data:
-        revenue = income_data.get('营业收入', 0)
-        cost = income_data.get('营业成本', 0)
-        expenses = income_data.get('期间费用', 0)
-        net_profit = income_data.get('净利润', 0)
-        
-        if revenue > 0:
-            metrics['毛利率'] = ((revenue - cost) / revenue) * 100
-            metrics['净利率'] = (net_profit / revenue) * 100
-        if revenue > 0:
-            metrics['成本率'] = (cost / revenue) * 100
-            metrics['费用率'] = (expenses / revenue) * 100
+    total_liabilities = balance_data.get('负债合计', 0)
+    if total_liabilities == 0:
+        for k, v in balance_data.items():
+            if '负债' in k and '合计' in k:
+                total_liabilities = v
+                break
+    
+    total_equity = balance_data.get('所有者权益合计', 0)
+    if total_equity == 0:
+        for k, v in balance_data.items():
+            if ('权益' in k or '股东' in k) and '合计' in k:
+                total_equity = v
+                break
+    
+    if total_assets > 0:
+        metrics['资产负债率'] = (total_liabilities / total_assets) * 100
+    
+    revenue = income_data.get('营业收入', 0)
+    if revenue == 0:
+        for k, v in income_data.items():
+            if '收入' in k and '合计' not in k:
+                revenue = v
+                break
+    
+    cost = income_data.get('营业成本', 0)
+    if cost == 0:
+        for k, v in income_data.items():
+            if '成本' in k and '合计' not in k:
+                cost = v
+                break
+    
+    expenses = income_data.get('销售费用', 0) + income_data.get('管理费用', 0) + income_data.get('财务费用', 0)
+    
+    net_profit = income_data.get('净利润', 0)
+    if net_profit == 0:
+        for k, v in income_data.items():
+            if '净利润' in k:
+                net_profit = v
+                break
+    
+    if revenue > 0:
+        metrics['毛利率'] = ((revenue - cost) / revenue) * 100
+        metrics['净利率'] = (net_profit / revenue) * 100
     
     if cashflow_data:
         operating_cf = cashflow_data.get('经营活动净流量', 0)
-        investing_cf = cashflow_data.get('投资活动净流量', 0)
-        financing_cf = cashflow_data.get('筹资活动净流量', 0)
-        
+        if operating_cf == 0:
+            for k, v in cashflow_data.items():
+                if '经营' in k and '净额' in k:
+                    operating_cf = v
+                    break
         metrics['经营现金流'] = operating_cf
-        metrics['投资现金流'] = investing_cf
-        metrics['筹资现金流'] = financing_cf
     
     return metrics, balance_data, income_data, cashflow_data
 
@@ -221,8 +271,10 @@ def generate_charts(balance_data, income_data, cashflow_data):
     charts = []
     
     if balance_data:
-        assets = {k: v for k, v in balance_data.items() if v > 0 and k not in ['负债总计', '所有者权益', '负债加权益']}
-        assets = {k: v for k, v in assets.items() if '负债' not in k and '权益' not in k}
+        assets = {}
+        for k, v in balance_data.items():
+            if v > 0 and '资产' in k and '合计' not in k and '负债' not in k and '权益' not in k:
+                assets[k] = v
         
         if assets:
             fig = px.pie(
@@ -233,18 +285,15 @@ def generate_charts(balance_data, income_data, cashflow_data):
             )
             charts.append(('资产结构', fig))
         
-        liab_equity = {}
-        if balance_data.get('负债总计', 0) > 0:
-            liab_equity['负债'] = balance_data['负债总计']
-        if balance_data.get('所有者权益', 0) > 0:
-            liab_equity['所有者权益'] = balance_data['所有者权益']
+        liab = balance_data.get('负债合计', 0)
+        equity = balance_data.get('所有者权益合计', 0)
         
-        if liab_equity:
+        if liab > 0 or equity > 0:
             fig = px.bar(
-                x=list(liab_equity.keys()),
-                y=list(liab_equity.values()),
+                x=['负债', '所有者权益'],
+                y=[liab, equity],
                 title="⚖️ 负债与权益对比",
-                color=list(liab_equity.keys()),
+                color=['负债', '所有者权益'],
                 color_discrete_sequence=['#ff6b6b', '#4ecdc4']
             )
             fig.update_layout(yaxis_title="金额")
@@ -252,14 +301,9 @@ def generate_charts(balance_data, income_data, cashflow_data):
     
     if income_data:
         items = {}
-        if income_data.get('营业收入', 0) > 0:
-            items['营业收入'] = income_data['营业收入']
-        if income_data.get('营业成本', 0) > 0:
-            items['营业成本'] = income_data['营业成本']
-        if income_data.get('毛利润', 0) > 0:
-            items['毛利润'] = income_data['毛利润']
-        if income_data.get('净利润', 0) > 0:
-            items['净利润'] = income_data['净利润']
+        for k, v in income_data.items():
+            if v > 0:
+                items[k] = v
         
         if items:
             fig = px.bar(
@@ -274,12 +318,9 @@ def generate_charts(balance_data, income_data, cashflow_data):
     
     if cashflow_data:
         cf_items = {}
-        if cashflow_data.get('经营活动净流量', 0) != 0:
-            cf_items['经营活动'] = cashflow_data['经营活动净流量']
-        if cashflow_data.get('投资活动净流量', 0) != 0:
-            cf_items['投资活动'] = cashflow_data['投资活动净流量']
-        if cashflow_data.get('筹资活动净流量', 0) != 0:
-            cf_items['筹资活动'] = cashflow_data['筹资活动净流量']
+        for k, v in cashflow_data.items():
+            if v != 0:
+                cf_items[k] = v
         
         if cf_items:
             fig = px.bar(
@@ -317,12 +358,20 @@ if uploaded_file is not None:
         for sheet_name, info in summary.items():
             st.sidebar.success(f"✅ {sheet_name} ({info['type']})")
         
+        if not results:
+            st.warning("未能识别财务报表，请检查Excel文件格式")
+            
+            st.markdown("### 📋 原始数据预览")
+            for sheet_name, df in all_sheets_data.items():
+                with st.expander(f"📄 {sheet_name}"):
+                    st.dataframe(df.head(20), use_container_width=True)
+            st.stop()
+        
         st.success(f"✅ 文件上传成功！共识别到 {len(results)} 个财务报表")
         
         tab_names = ["📊 数据总览"]
         tab_names.extend(list(results.keys()))
-        if len(results) < 3:
-            tab_names.append("📈 可视化")
+        tab_names.append("📈 可视化")
         
         tabs = st.tabs(tab_names)
         
@@ -352,47 +401,54 @@ if uploaded_file is not None:
             
             with col1:
                 debt_ratio = metrics.get('资产负债率', 0)
-                st.metric("资产负债率", f"{debt_ratio:.2f}%", 
-                         delta="较高" if debt_ratio > 60 else "正常",
-                         delta_color="inverse" if debt_ratio > 60 else "normal")
+                if debt_ratio > 0:
+                    st.metric("资产负债率", f"{debt_ratio:.2f}%", 
+                             delta="较高" if debt_ratio > 60 else "正常",
+                             delta_color="inverse" if debt_ratio > 60 else "normal")
+                else:
+                    st.metric("资产负债率", "N/A")
             
             with col2:
                 gross_margin = metrics.get('毛利率', 0)
-                st.metric("毛利率", f"{gross_margin:.2f}%",
-                         delta="较高" if gross_margin > 30 else "较低",
-                         delta_color="normal" if gross_margin > 30 else "inverse")
+                if gross_margin > 0:
+                    st.metric("毛利率", f"{gross_margin:.2f}%")
+                else:
+                    st.metric("毛利率", "N/A")
             
             with col3:
                 net_margin = metrics.get('净利率', 0)
-                st.metric("净利率", f"{net_margin:.2f}%")
+                if net_margin > 0:
+                    st.metric("净利率", f"{net_margin:.2f}%")
+                else:
+                    st.metric("净利率", "N/A")
             
             with col4:
                 op_cf = metrics.get('经营现金流', 0)
-                st.metric("经营活动现金流", f"{op_cf:,.0f}")
+                st.metric("经营活动现金流", f"{op_cf:,.0f}" if op_cf != 0 else "N/A")
             
             st.markdown("---")
             
-            st.markdown("### 📋 各报表数据明细")
+            st.markdown("### 📋 各报表提取数据")
             
             for sheet_name, info in results.items():
-                with st.expander(f"📄 {sheet_name} ({info['type']})"):
-                    type_name = {'balance': '资产负债表', 'income': '利润表', 'cashflow': '现金流量表'}.get(info['type'], info['type'])
-                    st.markdown(f"**报表类型:** {type_name}")
-                    
-                    if info['data']:
-                        data_list = [{'项目': k, '金额': v} for k, v in info['data'].items()]
-                        st.dataframe(pd.DataFrame(data_list), use_container_width=True)
-                    else:
-                        st.warning("未能提取到数据，请检查表格格式")
+                type_name = {'balance': '资产负债表', 'income': '利润表', 'cashflow': '现金流量表'}.get(info['type'], info['type'])
+                st.markdown(f"#### 📄 {sheet_name} ({type_name})")
+                
+                if info['data']:
+                    data_list = [{'项目': k, '金额': v} for k, v in info['data'].items()]
+                    df_display = pd.DataFrame(data_list)
+                    st.dataframe(df_display, use_container_width=True)
+                else:
+                    st.warning("未能提取到数据")
+                
+                st.markdown("---")
         
         tab_idx = 1
         for sheet_name, info in results.items():
             if tab_idx < len(tabs):
                 with tabs[tab_idx]:
-                    st.markdown(f"### 📄 {sheet_name} - {info['type']}")
-                    
                     type_name = {'balance': '资产负债表', 'income': '利润表', 'cashflow': '现金流量表'}.get(info['type'], info['type'])
-                    st.markdown(f"**{type_name}**")
+                    st.markdown(f"### 📄 {sheet_name} - {type_name}")
                     
                     if info['data']:
                         data_list = [{'项目': k, '金额': v} for k, v in info['data'].items()]
@@ -409,7 +465,7 @@ if uploaded_file is not None:
                 
                 tab_idx += 1
         
-        if len(tabs) > tab_idx:
+        if tab_idx < len(tabs):
             with tabs[tab_idx]:
                 st.markdown("### 📈 可视化分析")
                 
@@ -430,6 +486,13 @@ if uploaded_file is not None:
                 
                 metrics_df = pd.DataFrame([metrics])
                 metrics_df.to_excel(writer, sheet_name='财务指标', index=False)
+                
+                all_extracted = {}
+                for sheet_name, info in results.items():
+                    all_extracted.update(info['data'])
+                if all_extracted:
+                    extracted_df = pd.DataFrame([{'项目': k, '金额': v} for k, v in all_extracted.items()])
+                    extracted_df.to_excel(writer, sheet_name='提取数据', index=False)
             
             st.download_button(
                 label="📥 下载完整报告",
